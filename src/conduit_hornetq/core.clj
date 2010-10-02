@@ -41,6 +41,16 @@
    (fn [session queue]
      (.createConsumer session queue))))
 
+(defn receive [session queue]
+  (let [msg (.receive (consumer session queue))]
+    [(.getStringProperty msg "id")
+     [msg (.getStringProperty msg "replyTo")]]))
+
+(defn msg->bytes [msg]
+  (let [bytes (byte-array (.getBodySize msg))]
+    (-> msg .getBodyBuffer (.readBytes bytes))
+    bytes))
+
 (defn hornetq-pub-no-reply [queue id]
   (fn hornetq-no-reply [bytes]
     (let [producer (producer *session* queue)
@@ -90,8 +100,7 @@
       (.send producer msg)
       (.commit *session*)
       (let [msg (.receive (consumer *session* reply-queue))
-            bytes (byte-array (.getBodySize msg))]
-        (-> msg .getBodyBuffer (.readBytes bytes))
+            bytes (msg->bytes msg)]
         (ack *session* msg)
         [[bytes] hornetq-reply]))))
 
@@ -107,35 +116,33 @@
     (.readObject ois)))
 
 (defn a-hornetq [queue id proc]
-  (assoc proc
-    :type :hornetq
-    :source queue
-    :id (str id)
-    :reply (hornetq-pub-reply queue (str id "-reply"))
-    :no-reply (hornetq-pub-no-reply queue id)
-    :scatter-gather (hornetq-sg-fn queue (str id "-reply"))
-    :parts (assoc (:parts proc)
-             queue {:type :hornetq
-                    (str id) (:no-reply proc)
-                    (str id "-reply") (reply-fn (:reply proc))})))
+  (let [reply-id (str id "-reply")
+        id (str id)
+        queue (str queue)]
+    (assoc proc
+      :type :hornetq
+      :source queue
+      :id (str id)
+      :reply (hornetq-pub-reply queue reply-id)
+      :no-reply (hornetq-pub-no-reply queue id)
+      :scatter-gather (hornetq-sg-fn queue reply-id)
+      :parts (assoc (:parts proc)
+               queue {:type :hornetq
+                      (str id) (:no-reply proc)
+                      reply-id (reply-fn (:reply proc))}))))
+
 
 (defn hornetq-run [proc session]
+  (.start session)
   (try
-    (.start session)
     (let [queue (:source proc)
           _ (create-queue session queue)]
       (letfn [(next-msg [queue]
                 (fn next-msg-inner [_]
-                  (let [msg (.receive (consumer session queue))]
-                    [[[(.getStringProperty msg "id")
-                       [msg (.getStringProperty msg "replyTo")]]]
-                     next-msg-inner])))
+                  [[(receive session queue)] next-msg-inner]))
               (handle-msg [f msg]
                 (try
-                  (let [bytes (byte-array (.getBodySize (first (second msg))))
-                        _ (-> (second msg) first .getBodyBuffer
-                              (.readBytes bytes))
-                        msg-pair (update-in msg [1 0] (constantly bytes))
+                  (let [msg-pair (update-in msg [1 0] msg->bytes)
                         result (f msg-pair)
                         new-f (second result)]
                     (ack session (first (second msg)))
