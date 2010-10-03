@@ -17,57 +17,59 @@
 (defn create-session [session-factory user password]
   (.createSession session-factory user password false true true false 1))
 
-(defn create-tmp-queue [session name]
+(defn- create-tmp-queue [session name]
   (.createTemporaryQueue session name name))
 
-(defn create-queue [session name]
+(defn- create-queue [session name]
   (try
     (.createQueue session name name)
     (catch Exception _)))
 
-(defn ack [session msg]
+(defn- ack [session msg]
   (.acknowledge msg)
   (.commit session))
 
 (declare *session*)
 
-(def producer
+(def ^{:private true} producer
   (memoize
    (fn [session queue]
      (.createProducer session queue))))
 
-(def consumer
+(def ^{:private true} consumer
   (memoize
    (fn [session queue]
      (.createConsumer session queue))))
 
-(defn receive [session queue]
+(defn- receive [session queue]
   (let [msg (.receive (consumer session queue))]
     [(.getStringProperty msg "id")
      [msg (.getStringProperty msg "replyTo")]]))
 
-(defn msg->bytes [msg]
+(defn- msg->bytes [msg]
   (let [bytes (byte-array (.getBodySize msg))]
     (-> msg .getBodyBuffer (.readBytes bytes))
     bytes))
 
-(defn hornetq-pub-no-reply [queue id]
+(defn- bytes->msg [session bytes]
+  (doto (.createMessage session true)
+    (-> .getBodyBuffer (.writeBytes bytes))))
+
+(defn- hornetq-pub-no-reply [queue id]
   (fn hornetq-no-reply [bytes]
     (let [producer (producer *session* queue)
-          msg (.createMessage *session* true)]
-      (-> msg .getBodyBuffer (.writeBytes bytes))
+          msg (bytes->msg *session* bytes)]
       (.putStringProperty msg "id" id)
       (.send producer msg)
       [[] hornetq-no-reply])))
 
-(defn hornetq-sg-fn [queue id]
+(defn- hornetq-sg-fn [queue id]
   (fn hornetq-reply [bytes]
     (let [producer (producer *session* queue)
-          msg (.createMessage *session* true)
+          msg (bytes->msg *session* bytes)
           reply-queue (str queue ".reply." (UUID/randomUUID))
           consumer (consumer *session* queue)]
       (create-tmp-queue *session* reply-queue)
-      (-> msg .getBodyBuffer (.writeBytes bytes))
       (.putStringProperty msg "id" id)
       (.putStringProperty msg "replyTo" reply-queue)
       (.send @producer msg)
@@ -76,25 +78,23 @@
           (ack *session* msg)
           [msg hornetq-reply])))))
 
-(defn reply-fn [f]
+(defn- reply-fn [f]
   (partial (fn hornet-reply-fn [f [bytes reply-queue]]
              (let [producer (.createProducer *session* reply-queue)
                    [[new-bytes] new-f] (f bytes)
-                   new-msg (.createMessage *session* true)]
-               (-> new-msg .getBodyBuffer (.writeBytes new-bytes))
+                   new-msg (bytes->msg *session* new-bytes)]
                (.send producer new-msg)
                (.commit *session*)
                [[] (partial hornet-reply-fn new-f)]))
            f))
 
-(defn hornetq-pub-reply [queue id]
+(defn- hornetq-pub-reply [queue id]
   (fn hornetq-reply [bytes]
     (create-queue *session* queue)
     (let [producer (producer *session* queue)
-          msg (.createMessage *session* true)
+          msg (bytes->msg *session* bytes)
           reply-queue (str queue ".reply." (UUID/randomUUID))]
       (create-tmp-queue *session* reply-queue)
-      (-> msg .getBodyBuffer (.writeBytes bytes))
       (.putStringProperty msg "id" id)
       (.putStringProperty msg "replyTo" reply-queue)
       (.send producer msg)
@@ -115,24 +115,28 @@
               ois (ObjectInputStream. bais)]
     (.readObject ois)))
 
-(defn a-hornetq [queue id proc]
+(defn a-hornetq
+  "turn a proc into a hornetq proc that listens on a queue"
+  [queue id proc]
   (let [reply-id (str id "-reply")
         id (str id)
         queue (str queue)]
     (assoc proc
       :type :hornetq
       :source queue
-      :id (str id)
+      :id id
       :reply (hornetq-pub-reply queue reply-id)
       :no-reply (hornetq-pub-no-reply queue id)
       :scatter-gather (hornetq-sg-fn queue reply-id)
       :parts (assoc (:parts proc)
                queue {:type :hornetq
-                      (str id) (:no-reply proc)
+                      id (:no-reply proc)
                       reply-id (reply-fn (:reply proc))}))))
 
 
-(defn hornetq-run [proc session]
+(defn hornetq-run
+  "start a single thread executing a proc"
+  [proc session]
   (.start session)
   (try
     (let [queue (:source proc)
@@ -140,23 +144,22 @@
       (letfn [(next-msg [queue]
                 (fn next-msg-inner [_]
                   [[(receive session queue)] next-msg-inner]))
+              (handle-msg* [f msg]
+                (let [[_ [msg-object _]] msg
+                      msg-pair (update-in msg [1 0] msg->bytes)
+                      [_ new-f] (f msg-pair)]
+                  (ack session msg-object)
+                  [[] (partial handle-msg new-f)]))
               (handle-msg [f msg]
                 (try
-                  (let [msg-pair (update-in msg [1 0] msg->bytes)
-                        result (f msg-pair)
-                        new-f (second result)]
-                    (ack session (first (second msg)))
-                    [[] (partial handle-msg new-f)])
+                  (handle-msg* f msg)
                   (catch Exception e
                     [[] f])))]
-        (binding [*session* session]
-          (dorun
-           (a-run
-            (reduce
-             comp-fn
-             [(next-msg queue)
-              (partial handle-msg
-                       (partial select-fn
-                                (get-in proc [:parts queue])))]))))))
+        (let [init-select-fn (partial select-fn (get-in proc [:parts queue]))
+              init-handle-msg (partial handle-msg init-select-fn)]
+          (binding [*session* session]
+            (dorun
+             (a-run
+              (reduce comp-fn [(next-msg queue) init-handle-msg])))))))
     (finally
      (.stop session))))
