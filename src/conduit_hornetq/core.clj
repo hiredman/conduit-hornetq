@@ -1,3 +1,6 @@
+;;TODO: procs can yield multiple values, how to deal with that with
+;;reply queues?
+;;TODO: is there some better way to "run procs" on a queue?
 (ns conduit-hornetq.core
   (:use [conduit.core])
   (:import (org.hornetq.api.core TransportConfiguration SimpleString)
@@ -5,12 +8,13 @@
            (org.hornetq.core.remoting.impl.netty NettyConnectorFactory)
            (java.util UUID)
            (java.io ByteArrayOutputStream ObjectOutputStream
-                    ByteArrayInputStream ObjectInputStream)))
+                    ByteArrayInputStream ObjectInputStream)
+           (java.util.concurrent ConcurrentHashMap)))
 
 (defn create-session-factory [host port]
-  (-> NettyConnectorFactory .getName
-      (TransportConfiguration.
-       {"host" host "port" port})
+  (-> NettyConnectorFactory
+      .getName
+      (TransportConfiguration. {"host" host "port" port})
       (HornetQClient/createClientSessionFactory)
       (doto (.setReconnectAttempts -1))))
 
@@ -133,33 +137,30 @@
                       id (:no-reply proc)
                       reply-id (reply-fn (:reply proc))}))))
 
-
 (defn hornetq-run
   "start a single thread executing a proc"
-  [proc session]
+  [{queue :source :as proc} session]
   (.start session)
   (try
-    (let [queue (:source proc)
-          _ (create-queue session queue)]
-      (letfn [(next-msg [queue]
-                (fn next-msg-inner [_]
-                  [[(receive session queue)] next-msg-inner]))
-              (handle-msg* [f msg]
-                (let [[_ [msg-object _]] msg
-                      msg-pair (update-in msg [1 0] msg->bytes)
-                      [_ new-f] (f msg-pair)]
+    (create-queue session queue)
+    (letfn [(next-msg [queue]
+              (fn next-msg-inner [_]
+                [[(receive session queue)] next-msg-inner]))
+            (handle-msg [fun [id [msg-object reply-queue]]]
+              (try
+                (let [msg-bytes (msg->bytes msg-object)
+                      [_ new-fun] (fun [id [msg-bytes reply-queue]])]
                   (ack session msg-object)
-                  [[] (partial handle-msg new-f)]))
-              (handle-msg [f msg]
-                (try
-                  (handle-msg* f msg)
-                  (catch Exception e
-                    [[] f])))]
-        (let [init-select-fn (partial select-fn (get-in proc [:parts queue]))
-              init-handle-msg (partial handle-msg init-select-fn)]
-          (binding [*session* session]
-            (dorun
-             (a-run
-              (reduce comp-fn [(next-msg queue) init-handle-msg])))))))
+                  [[] (partial handle-msg new-fun)])
+                (catch Exception e
+                  [[] fun])))]
+      (binding [*session* session]
+        (->> [(next-msg queue)
+              (partial handle-msg
+                       (partial select-fn
+                                (get-in proc [:parts queue])))]
+             (reduce comp-fn)
+             (a-run)
+             (dorun))))
     (finally
      (.stop session))))
