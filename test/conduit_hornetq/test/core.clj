@@ -1,5 +1,5 @@
 (ns conduit-hornetq.test.core
-  (:use [conduit-hornetq.core] :reload)
+  (:use [conduit.hornetq] :reload)
   (:use [clojure.test]
         [conduit.core])
   (:import [java.util UUID]))

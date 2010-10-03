@@ -1,7 +1,7 @@
 ;;TODO: procs can yield multiple values, how to deal with that with
 ;;reply queues?
 ;;TODO: is there some better way to "run procs" on a queue?
-(ns conduit-hornetq.core
+(ns conduit.hornetq
   (:use [conduit.core])
   (:import (org.hornetq.api.core TransportConfiguration SimpleString)
            (org.hornetq.api.core.client HornetQClient MessageHandler)
