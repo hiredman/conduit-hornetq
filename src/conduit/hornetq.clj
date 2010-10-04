@@ -1,6 +1,7 @@
 ;;TODO: procs can yield multiple values, how to deal with that with
 ;;reply queues?
 ;;TODO: is there some better way to "run procs" on a queue?
+;;TODO: auto serialize
 (ns conduit.hornetq
   (:use [conduit.core])
   (:import (org.hornetq.api.core TransportConfiguration SimpleString)
@@ -139,7 +140,7 @@
 
 (defn hornetq-run
   "start a single thread executing a proc"
-  [{queue :source :as proc} session]
+  [proc queue session]
   (.start session)
   (try
     (create-queue session queue)

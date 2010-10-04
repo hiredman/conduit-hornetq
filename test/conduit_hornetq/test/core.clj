@@ -16,15 +16,19 @@
     (a-arr identity))
    pass-through))
 
+(def upcase-queue (str "some.q." (UUID/randomUUID)))
+
 (def upcase (a-hornetq
-             (str "some.q." (UUID/randomUUID))
+             upcase-queue
              "upcase"
              (a-comp deserialize
                      (a-arr #(.toUpperCase %))
                      serialize)))
 
+(def evaler-queue (str "some.q." (UUID/randomUUID)))
+
 (def evaler (a-hornetq
-             (str "some.q." (UUID/randomUUID))
+             evaler-queue
              "eval"
              (a-comp deserialize
                      (a-arr eval)
@@ -36,12 +40,12 @@
                   (let [session *session*]
                     (future
                       (try
-                        (hornetq-run upcase session)
+                        (hornetq-run upcase upcase-queue session)
                         (catch Exception e
                           (.printStackTrace e))))
                     (future
                       (try
-                        (hornetq-run evaler session)
+                        (hornetq-run evaler evaler-queue session)
                         (catch Exception e
                           (.printStackTrace e)))))
                   (try
