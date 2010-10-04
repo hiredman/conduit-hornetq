@@ -1,6 +1,5 @@
 ;;TODO: procs can yield multiple values, how to deal with that with
 ;;reply queues?
-;;TODO: is there some better way to "run procs" on a queue?
 ;;TODO: auto serialize
 (ns conduit.hornetq
   (:use [conduit.core])
@@ -60,18 +59,30 @@
   (doto (.createMessage session true)
     (-> .getBodyBuffer (.writeBytes bytes))))
 
+(defn serialize [object]
+  (with-open [baos (ByteArrayOutputStream.)
+              oos (ObjectOutputStream. baos)]
+    (.writeObject oos object)
+    (.toByteArray baos)))
+
+(defn deserialize [bytes]
+  (with-open [bais (ByteArrayInputStream. bytes)
+              ois (ObjectInputStream. bais)]
+    (.readObject ois)))
+
+
 (defn- hornetq-pub-no-reply [queue id]
-  (fn hornetq-no-reply [bytes]
+  (fn hornetq-no-reply [value]
     (let [producer (producer *session* queue)
-          msg (bytes->msg *session* bytes)]
+          msg (bytes->msg *session* (serialize value))]
       (.putStringProperty msg "id" id)
       (.send producer msg)
       [[] hornetq-no-reply])))
 
 (defn- hornetq-sg-fn [queue id]
-  (fn hornetq-reply [bytes]
+  (fn hornetq-reply [value]
     (let [producer (producer *session* queue)
-          msg (bytes->msg *session* bytes)
+          msg (bytes->msg *session* (serialize value))
           reply-queue (str queue ".reply." (UUID/randomUUID))
           consumer (consumer *session* queue)]
       (create-tmp-queue *session* reply-queue)
@@ -81,23 +92,23 @@
       (fn []
         (let [msg (.receive consumer)]
           (ack *session* msg)
-          [msg hornetq-reply])))))
+          [[(deserialize (msg->bytes msg))] hornetq-reply])))))
 
 (defn- reply-fn [f]
-  (partial (fn hornet-reply-fn [f [bytes reply-queue]]
+  (partial (fn hornet-reply-fn [f [value reply-queue]]
              (let [producer (.createProducer *session* reply-queue)
-                   [[new-bytes] new-f] (f bytes)
-                   new-msg (bytes->msg *session* new-bytes)]
+                   [[new-value] new-f] (f value)
+                   new-msg (bytes->msg *session* (serialize new-value))]
                (.send producer new-msg)
                (.commit *session*)
                [[] (partial hornet-reply-fn new-f)]))
            f))
 
 (defn- hornetq-pub-reply [queue id]
-  (fn hornetq-reply [bytes]
+  (fn hornetq-reply [value]
     (create-queue *session* queue)
     (let [producer (producer *session* queue)
-          msg (bytes->msg *session* bytes)
+          msg (bytes->msg *session* (serialize value))
           reply-queue (str queue ".reply." (UUID/randomUUID))]
       (create-tmp-queue *session* reply-queue)
       (.putStringProperty msg "id" id)
@@ -105,20 +116,10 @@
       (.send producer msg)
       (.commit *session*)
       (let [msg (.receive (consumer *session* reply-queue))
-            bytes (msg->bytes msg)]
+            value (deserialize (msg->bytes msg))]
         (ack *session* msg)
-        [[bytes] hornetq-reply]))))
+        [[value] hornetq-reply]))))
 
-(def-arr serialize [object]
-  (with-open [baos (ByteArrayOutputStream.)
-              oos (ObjectOutputStream. baos)]
-    (.writeObject oos object)
-    (.toByteArray baos)))
-
-(def-arr deserialize [bytes]
-  (with-open [bais (ByteArrayInputStream. bytes)
-              ois (ObjectInputStream. bais)]
-    (.readObject ois)))
 
 (defn a-hornetq
   "turn a proc into a hornetq proc that listens on a queue"
@@ -149,8 +150,8 @@
                 [[(receive session queue)] next-msg-inner]))
             (handle-msg [fun [id [msg-object reply-queue]]]
               (try
-                (let [msg-bytes (msg->bytes msg-object)
-                      [_ new-fun] (fun [id [msg-bytes reply-queue]])]
+                (let [msg-value (deserialize (msg->bytes msg-object))
+                      [_ new-fun] (fun [id [msg-value reply-queue]])]
                   (ack session msg-object)
                   [[] (partial handle-msg new-fun)])
                 (catch Exception e

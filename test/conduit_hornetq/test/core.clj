@@ -21,18 +21,14 @@
 (def upcase (a-hornetq
              upcase-queue
              "upcase"
-             (a-comp deserialize
-                     (a-arr #(.toUpperCase %))
-                     serialize)))
+             (a-arr #(.toUpperCase %))))
 
 (def evaler-queue (str "some.q." (UUID/randomUUID)))
 
 (def evaler (a-hornetq
              evaler-queue
              "eval"
-             (a-comp deserialize
-                     (a-arr eval)
-                     serialize)))
+             (a-arr eval)))
 
 (use-fixtures :once
               (fn [f]
@@ -57,32 +53,21 @@
 (deftest test-a-hornetq
   (let [[result] ((test-conduit-fn hornet-proc) (.getBytes "foo bar"))]
     (is (= "foo bar" (String. result "utf8"))))
-  (let [[result] ((test-conduit-fn
-                   (a-comp serialize
-                           hornet-proc
-                           deserialize)) "foo bar")]
-    (is (= "foo bar" result)))
   (let [result (conduit-map
-                (a-comp serialize
-                        upcase
-                        deserialize
+                (a-comp upcase
                         pass-through)
                 ["foo" "bar"])]
     (is (= ["FOO" "BAR"] result)))
   (let [[result] (conduit-map
-                  (a-comp serialize
-                          evaler
-                          deserialize
+                  (a-comp evaler
                           pass-through)
                   ['(+ 1 2)])]
     (is (= 3 result)))
   (let [result (conduit-map
-                (a-comp (a-par pass-through
-                               serialize)
-                        (a-select
+                (a-comp (a-select
                          :sexp evaler
                          :string upcase)
-                        deserialize)
+                        pass-through)
                 [[:sexp '(+ 1 2)]
                  [:string "foo"]])]
     (is (= [3 "FOO"] result))))
